@@ -1,0 +1,17 @@
+[leveldb]
+path=data/data.db
+
+[data-source]
+type=rpc
+uri=https://api.avax.network/ext/bc/C/rpc
+#type=mongo
+#uri=mongodb://127.0.0.1:27017/database
+
+[rpc]
+host=*
+port=3030
+
+[sync]
+start=38234549
+end=0
+size=1

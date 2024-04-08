@@ -1,0 +1,9 @@
+.idea
+/bin/
+/snapshots/
+*.db/
+.DS_Store
+*.output.txt
+/logs.txt
+/config.ini
+./indexer
