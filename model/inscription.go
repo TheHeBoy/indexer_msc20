@@ -1,13 +1,18 @@
 package model
 
 type Inscription struct {
-	Id          string
-	Number      uint64
-	From        string
-	To          string
-	Block       uint64
-	Idx         uint32
-	Timestamp   uint64
-	ContentType string
-	Content     string
+	BaseModel
+
+	Hash        string `json:"hash"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+	Block       uint64 `json:"block"`
+	Idx         uint32 `json:"idx"`
+	Timestamp   uint64 `json:"timestamp"`
+	ContentType string `json:"contentType"`
+	Content     string `json:"content"`
+}
+
+func (ins *Inscription) CreateInscription() {
+	DB.Create(ins)
 }

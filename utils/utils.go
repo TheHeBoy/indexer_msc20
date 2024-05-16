@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"github.com/pkg/errors"
 	"github.com/wealdtech/go-merkletree/keccak256"
 	"math/big"
 	"strconv"
@@ -64,15 +65,15 @@ func ParseInt32(str string) int32 {
 	}
 }
 
-func ParseInt64(str string) int64 {
+func ParseUint64(str string) (uint64, error) {
 	if strings.Contains(str, ".") {
-		str = strings.Split(str, ".")[0]
+		return 0, errors.New("invalid number")
 	}
-	rst, err := strconv.ParseInt(str, 10, 64)
+	rst, err := strconv.ParseUint(str, 10, 64)
 	if err != nil {
-		return 0
+		return 0, err
 	} else {
-		return rst
+		return rst, nil
 	}
 }
 

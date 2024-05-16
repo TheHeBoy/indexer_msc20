@@ -2,83 +2,104 @@ package handlers
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/go-resty/resty/v2"
-	"open-indexer/model"
-	"open-indexer/model/fetch"
-	"open-indexer/utils"
+	"github.com/pkg/errors"
+	"indexer/config"
+	"indexer/model"
+	"indexer/model/fetch"
+	"indexer/utils"
 	"strconv"
 	"sync"
 	"time"
 )
 
-var req = resty.New().SetTimeout(3 * time.Second)
-var fetchUrl = ""
+var req *resty.Client
+var fetchUrl string
 
-var fetchDataBlock uint64
 var fetchInterrupt bool
+
+// rpc中最新的区块号
 var lastBlockNumber uint64
 
-var cachedTranscriptions = make(map[uint64][]*model.Transaction)
-var cachedLogs = make(map[uint64][]*model.EvmLog)
-var cachedBlockNumber uint64
+// 当前同步的区块号
+var curSyncBlock uint64
+var confirmBlockHeight uint64
 
-func StartFetch() {
-	//value, err := db.Get([]byte("h-data-block"), nil)
-	//if err == nil {
-	//	fetchDataBlock = utils.BytesToUint64(value)
-	//} else {
-	//  fetchDataBlock = syncFromBlock - 1
-	//}
-	fetchDataBlock = syncFromBlock - 1
-	logger.Println("start fetch data from ", fetchDataBlock+1)
+func initFetch() {
+	// 配置网络代理
+	proxy := config.Cfg.Section("data-source").Key("proxy").MustString("")
+	req = resty.New().SetTimeout(3 * time.Second)
+	if proxy != "" {
+		req = req.SetProxy(proxy)
+	}
+	synCfg := config.Cfg.Section("fetch")
+	confirmBlockHeight = synCfg.Key("confirm").MustUint64(0)
 
-	if lastBlockNumber == 0 {
-		var err error
-		lastBlockNumber, err = fetchLastBlockNumber()
-		if err != nil {
-			panic("fetch last block number error")
-		}
-		logger.Println("fetch: last block number", lastBlockNumber)
+	// 1. 配置起始区块号
+	// 1.1 从配置文件获取起始区块号
+
+	startBlock := synCfg.Key("start").MustUint64(0)
+	// 1.2 从数据库获取保存的最新区块号
+	latestTransaction := model.GetLatestTransaction()
+	if latestTransaction.ID != 0 {
+		startBlock = latestTransaction.Block
+	}
+	// 1.3 从rpc获取最新区块号
+	var err error
+	lastBlockNumber, err = fetchLastBlockNumber()
+	if err != nil {
+		panic("can't get latest block from rpc")
 	}
 
-	// fetch
+	if startBlock > lastBlockNumber {
+		panic(fmt.Sprintf("start block greater than last block number: %d > %d", startBlock, lastBlockNumber))
+	}
+
+	curSyncBlock = startBlock
+	if curSyncBlock < 0 {
+		panic("curSyncBlock num is error")
+	}
+}
+
+func StartFetch() {
 	fetchInterrupt = false
 	for !fetchInterrupt {
-		var trxsResp fetch.BlockResponse
+		var txsResp fetch.BlockResponse
 		var logsResp fetch.LogsResponse
-		fetchDataBlock++
-		err := fetchData(fetchDataBlock, &trxsResp, &logsResp)
-		if err != nil {
+		err := fetchData(curSyncBlock, &txsResp, &logsResp)
+		if err != nil { // 已经拉取到最新区块了
 			logger.Println("fetch error:", err.Error())
-			fetchDataBlock--
 			time.Sleep(time.Duration(1) * time.Second)
 		} else {
-			err = saveData(&trxsResp, &logsResp)
+			// 开始事务
+			tx := model.DB.Begin()
+			err = saveData(&txsResp, &logsResp)
+
 			if err != nil {
-				logger.Println("fetch: save error:", err.Error())
+				// 回滚事务
+				tx.Rollback()
+				fmt.Printf("fetch: save error:%+v", err)
 				QuitChan <- true
 				break
 			}
+			// 提交事务
+			tx.Commit()
+
+			// 开始下一个区块
+			curSyncBlock++
 		}
 	}
 
-	StopSuccessCount++
 	logger.Println("fetch stopped")
 }
 
 func StopFetch() {
 	fetchInterrupt = true
-	if DataSourceType != "rpc" {
-		StopSuccessCount++
-	}
 }
 
-func fetchData(blockNumber uint64, blockResp *fetch.BlockResponse, logsResp *fetch.LogsResponse) error {
-	start := time.Now().UnixMilli()
-
-	if blockNumber > lastBlockNumber {
+func fetchData(curSyncBlock uint64, blockResp *fetch.BlockResponse, logsResp *fetch.LogsResponse) error {
+	if curSyncBlock > lastBlockNumber {
 		lastBlock, err := fetchLastBlockNumber()
 		if err != nil {
 			return err
@@ -86,8 +107,9 @@ func fetchData(blockNumber uint64, blockResp *fetch.BlockResponse, logsResp *fet
 		lastBlockNumber = lastBlock
 	}
 
-	if blockNumber > lastBlockNumber {
-		return errors.New("no new blocks to be fetched")
+	if curSyncBlock > lastBlockNumber {
+		errStr := fmt.Sprintf("no new blocks to be fetched, curSyncBlock: %d, lastBlockNumber %d", curSyncBlock, lastBlockNumber)
+		return errors.New(errStr)
 	}
 
 	var wg sync.WaitGroup
@@ -96,11 +118,11 @@ func fetchData(blockNumber uint64, blockResp *fetch.BlockResponse, logsResp *fet
 
 	wg.Add(2)
 	go func() {
-		err0 = fetchTransactions(blockNumber, blockResp)
+		err0 = fetchTransactions(curSyncBlock, blockResp)
 		wg.Done()
 	}()
 	go func() {
-		err1 = fetchContractLogs(blockNumber, logsResp)
+		err1 = fetchContractLogs(curSyncBlock, logsResp)
 		wg.Done()
 	}()
 
@@ -112,15 +134,11 @@ func fetchData(blockNumber uint64, blockResp *fetch.BlockResponse, logsResp *fet
 	if err1 != nil {
 		return err1
 	}
-	costs := time.Now().UnixMilli() - start
-	if costs > 200 {
-		logger.Info("fetch data at #", blockNumber, " costs ", costs, " ms")
-	}
+	logger.Info("fetch data at #", curSyncBlock)
 	return nil
 }
 
 func fetchLastBlockNumber() (uint64, error) {
-	//start := time.Now().UnixMilli()
 	reqJson := fmt.Sprintf(`{"id": "indexer","jsonrpc": "2.0","method": "eth_blockNumber","params": []}`)
 	resp, rerr := req.R().EnableTrace().
 		SetHeader("Content-Type", "application/json").
@@ -146,20 +164,18 @@ func fetchLastBlockNumber() (uint64, error) {
 		return 0, errors.New("fetch error data")
 	}
 
-	blockNumber := utils.HexToUint64(response.Result) - 2
+	blockNumber := utils.HexToUint64(response.Result) - confirmBlockHeight
 
 	return blockNumber, nil
 }
 
 func fetchTransactions(blockNumber uint64, response *fetch.BlockResponse) (err error) {
-	//start := time.Now().UnixMilli()
 	block := strconv.FormatUint(blockNumber, 16)
 	reqJson := fmt.Sprintf(`{"id": "indexer","jsonrpc": "2.0","method": "eth_getBlockByNumber","params": ["0x%s", %t]}`, block, true)
 	resp, rerr := req.R().EnableTrace().
 		SetHeader("Content-Type", "application/json").
 		SetHeader("Accept", "application/json").
-		SetBody(reqJson).
-		Post(fetchUrl)
+		SetBody(reqJson).Post(fetchUrl)
 	if rerr != nil {
 		logger.Info("fetch url error:", rerr)
 		err = rerr
@@ -177,20 +193,15 @@ func fetchTransactions(blockNumber uint64, response *fetch.BlockResponse) (err e
 		err = errors.New(fmt.Sprintf("fetch error code: %d, msg: %s", response.Error.Code, response.Error.Message))
 		return
 	}
-	if response.Id != "indexer" || response.JsonRpc != "2.0" || response.Result.Hash == "" {
+	if response.Id != "indexer" || response.JsonRpc != "2.0" || response.Result == nil {
 		err = errors.New("fetch error data")
 		return
 	}
 
-	//costs := time.Now().UnixMilli() - start
-	//if costs > 200 {
-	//	logger.Info("fetch trxs at #", blockNumber, ", costs ", costs, " ms")
-	//}
 	return
 }
 
 func fetchContractLogs(blockNumber uint64, response *fetch.LogsResponse) (err error) {
-	//start := time.Now().UnixMilli()
 	block := strconv.FormatUint(blockNumber, 16)
 	reqJson := fmt.Sprintf(`{"id": "indexer","jsonrpc": "2.0","method": "eth_getLogs","params": [{"fromBlock": "0x%s","toBlock": "0x%s"}]}`, block, block)
 	resp, rerr := req.R().EnableTrace().
@@ -220,10 +231,6 @@ func fetchContractLogs(blockNumber uint64, response *fetch.LogsResponse) (err er
 		return
 	}
 
-	//costs := time.Now().UnixMilli() - start
-	//if costs > 200 {
-	//	logger.Info("fetch logs at #", blockNumber, " costs ", costs, " ms")
-	//}
 	return
 }
 
@@ -233,22 +240,21 @@ func saveData(blockResp *fetch.BlockResponse, logsResp *fetch.LogsResponse) erro
 	var blockNumber = utils.HexToUint64(blockResp.Result.Number)
 	var timestamp = utils.HexToUint64(blockResp.Result.Timestamp)
 
-	// save trxs
-	trxs := make([]*model.Transaction, len(blockResp.Result.Transactions))
+	// save txs
+	txs := make([]*model.Transaction, len(blockResp.Result.Transactions))
 	for ti := range blockResp.Result.Transactions {
-		_trx := blockResp.Result.Transactions[ti]
-		trx := &model.Transaction{
-			Id:        _trx.Hash,
-			From:      _trx.From,
-			To:        _trx.To,
+		_tx := blockResp.Result.Transactions[ti]
+		tx := &model.Transaction{
+			Hash:      _tx.Hash,
+			From:      _tx.From,
+			To:        _tx.To,
 			Block:     blockNumber,
-			Idx:       utils.HexToUint32(_trx.TransactionIndex),
+			Idx:       utils.HexToUint32(_tx.TransactionIndex),
 			Timestamp: timestamp,
-			Input:     _trx.Input,
+			Input:     _tx.Input,
 		}
-		trxs[ti] = trx
+		txs[ti] = tx
 	}
-	cachedTranscriptions[blockNumber] = trxs
 
 	// save logs
 	logs := make([]*model.EvmLog, len(logsResp.Result))
@@ -260,27 +266,31 @@ func saveData(blockResp *fetch.BlockResponse, logsResp *fetch.LogsResponse) erro
 			Topics:    _log.Topics,
 			Data:      _log.Data,
 			Block:     blockNumber,
-			TrxIndex:  utils.HexToUint32(_log.TransactionIndex),
+			TxIndex:   utils.HexToUint32(_log.TransactionIndex),
 			LogIndex:  utils.HexToUint32(_log.LogIndex),
 			Timestamp: timestamp,
 		}
 		logs[li] = log
 	}
-	cachedLogs[blockNumber] = logs
 
-	cachedBlockNumber = blockNumber
+	// 对 log 和 tx 进行排序并合并
+	records := mixRecords(txs, logs)
 
-	// Only saved to memory for now, considering leveldb in the future
+	// 生成 inscription
+	err = processRecords(records)
+	if err != nil {
+		return err
+	}
 
-	//batch := new(leveldb.Batch)
-	// save block height
-	//batch.Put([]byte("h-data-block"), utils.Uint64ToBytes(blockNumber))
-	//
-	//// batch write
-	//err = db.Write(batch, nil)
-	//if err != nil {
-	//	logger.Fatal(err)
-	//}
+	// save tx and log to db
+	err = model.CreateBatchesTransaction(txs, len(txs))
+	if err != nil {
+		return err
+	}
+	err = model.CreateBatchesEvmLog(logs, len(logs))
+	if err != nil {
+		return err
+	}
 
-	return err
+	return nil
 }

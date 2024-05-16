@@ -48,13 +48,6 @@ type Block struct {
 	Transactions     []*Transaction `json:"transactions"`
 	TransactionsRoot string         `json:"transactionsRoot"`
 	Uncles           []interface{}  `json:"uncles"`
-	//Withdrawals      []struct {
-	//	Address        string `json:"address"`
-	//	Amount         string `json:"amount"`
-	//	Index          string `json:"index"`
-	//	ValidatorIndex string `json:"validatorIndex"`
-	//} `json:"withdrawals"`
-	//WithdrawalsRoot string `json:"withdrawalsRoot"`
 }
 
 type BlockResponse struct {
