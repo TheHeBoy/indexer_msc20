@@ -1,17 +1,24 @@
-[leveldb]
-path=data/data.db
+[db]
+host=127.0.0.1
+port=3306
+database=indexer
+username=root
+password=123456
+# 为true时，每次启动都会删除数据库，重新同步区块数据
+refresh=false
 
 [data-source]
 type=rpc
-uri=https://api.avax.network/ext/bc/C/rpc
-#type=mongo
-#uri=mongodb://127.0.0.1:27017/database
+# uri=http://127.0.0.1:8545
 
-[rpc]
-host=*
-port=3030
 
-[sync]
-start=38234549
-end=0
-size=1
+[fetch]
+# 开始拉取的区块数
+start=5917119
+# 确认区块高度
+confirm=2
+
+[mq]
+enable=true
+uri=amqp://root:123456@localhost:5672/
+contract_address=0x101a1092E32d405c041593ecE5128B7c10d8bAb9

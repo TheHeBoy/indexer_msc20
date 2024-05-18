@@ -72,20 +72,12 @@ func StartFetch() {
 			logger.Println("fetch error:", err.Error())
 			time.Sleep(time.Duration(1) * time.Second)
 		} else {
-			// 开始事务
-			tx := model.DB.Begin()
 			err = saveData(&txsResp, &logsResp)
-
 			if err != nil {
-				// 回滚事务
-				tx.Rollback()
 				fmt.Printf("fetch: save error:%+v", err)
 				QuitChan <- true
 				break
 			}
-			// 提交事务
-			tx.Commit()
-
 			// 开始下一个区块
 			curSyncBlock++
 		}
